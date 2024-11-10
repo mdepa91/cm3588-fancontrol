@@ -1,0 +1,10 @@
+[Unit]
+Description=Primitive Fan Contronl
+
+[Service]
+ExecStart=/usr/local/sbin/fanctl
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
