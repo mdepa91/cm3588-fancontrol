@@ -1,34 +1,25 @@
 #!/usr/bin/env python3
-
+import os
 import time
-
+import glob
+import numpy as np
 from pathlib import Path
 
-# these are sample vaules
-IDLE_TEMP = 50
-SPINUP_TEMP = 58
-# the speed gets mutiplied with 1000 and written to
-# /sys/class/pwm/pwmchip0/pwm0/duty_cycle - I had mixed results
-# using other values than 100000 as `period` when setting up the
-# PWM chip, so I advise against changing this; in any case, the
-# setup is done in /sys/class/pwm/pwmchip0/pwm0/period
-MAX_SPEED=100
-# MIN_SPEED should be set to the lowest value that still spins up the fan
-# wouthout coil whine, you need to find out for yourself
-MIN_SPEED=40
+FREQUENCY=25000                 # PWM fans uses 25kHz frequency
+TEMP_RANGE = [50, 70]           # Temperature range in °C
+FAN_SPEED_RANGE = [15, 100]     # Fan speed range in %
 
 
 def init():
-    with open("/sys/class/pwm/pwmchip0/export", "w") as file:
+    with open("/sys/class/pwm/pwmchip3/export", "w") as file:
         file.write("0")
-    with open("/sys/class/pwm/pwmchip0/pwm0/period", "w") as file:
-        file.write(str(int(MAX_SPEED*1000)))
-    with open("/sys/class/pwm/pwmchip0/pwm0/polarity", "w") as file:
+    with open("/sys/class/pwm/pwmchip3/pwm0/period", "w") as file:
+        file.write(str(FREQUENCY))
+    with open("/sys/class/pwm/pwmchip3/pwm0/polarity", "w") as file:
         file.write("normal")
-    with open("/sys/class/pwm/pwmchip0/pwm0/enable", "w") as file:
+    with open("/sys/class/pwm/pwmchip3/pwm0/enable", "w") as file:
         file.write("1")
-    with open("/sys/class/pwm/pwmchip0/pwm0/duty_cycle", "w") as file:
-        file.write("0")
+    set_fanspeed(MIN_SPEED)
 
 
 def read_temp():
@@ -37,33 +28,50 @@ def read_temp():
     temp = int(temp_raw) / 1000
     return temp
 
+def read_nvme_highest_temp():
+    file_paths = glob.glob('/sys/class/nvme/nvme*/hwmon*/temp*_input')
+    max_temp=0
+    nvme_name="<none>"
+    for file_path in file_paths:
+        try:
+            with open(file_path, 'r') as file:
+                temperature = int(file.read().strip())  # Read and convert to integer
+                if temperature > max_temp:
+                    max_temp = temperature
+                    name_path = os.path.abspath(os.path.join(file_path, "../../model"))
+                    with open(name_path) as file:
+                        nvme_name = file.read()
+        except Exception as e:
+            print(f"Error reading {file_path}: {e}")
+
+    temperature_celsius = max_temp / 1000  # Convert to Celsius
+    print(f"Highest nvme temperature {temperature_celsius}*C for {nvme_name}")
+    return temperature_celsius
+
+def read_highest_temp():
+    return max([read_temp(), read_nvme_highest_temp()])
 
 def set_fanspeed(speed):
-    with open("/sys/class/pwm/pwmchip0/pwm0/duty_cycle", "w") as file:
-        file.write(str(int(speed * 1000)))
+    with open("/sys/class/pwm/pwmchip3/pwm0/duty_cycle", "w") as file:
+        file.write(str(int((speed / 100) * FREQUENCY)))
 
 
 # this is the place to go crazy with fan curves and so on
 def compute_fanspeed(temp):
-    if temp > 75:
-        speed = MAX_SPEED
-    elif temp > 69:
-        speed = 80
-    else:
-        speed = MIN_SPEED
-    return speed
+    if temp < TEMP_RANGE[0]:
+        return 0
+    fan_speed = np.interp(temp, TEMP_RANGE, FAN_SPEED_RANGE)
+
+    # Clamp the fan speed to the min and max values
+    return max(FAN_SPEED_RANGE[0], min(FAN_SPEED_RANGE[1], fan_speed))
 
 
-if not Path("/sys/class/pwm/pwmchip0/pwm0/duty_cycle").exists():
+if not Path("/sys/class/pwm/pwmchip3/pwm0/duty_cycle").exists():
     init()
 
 while True:
-    temp = read_temp()
-    if temp >= SPINUP_TEMP:
-        while temp >= IDLE_TEMP:
-            set_fanspeed(compute_fanspeed(temp))
-            time.sleep(2)
-            temp = read_temp()
-    else:
-        set_fanspeed(0)
+    temp = read_highest_temp()
+    fan_speed = compute_fanspeed(temp)
+    set_fanspeed(fan_speed)
+    print(f'Calculated speed {fan_speed}% for highest temperature: {temp}*C')
     time.sleep(2)
